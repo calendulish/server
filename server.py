@@ -53,9 +53,30 @@ def quit(server_, loop):
     loop.close()
 
 
+def is_online(ip):
+    try:
+        subprocess.check_call(['ping', '-c', '1', '-W', '1', ip])
+    except subprocess.CalledProcessError:
+        return 'Offline'
+    else:
+        return 'Online'
+
+
 @lara_click.route('/', methods=['GET'])
 def lara_click_index(request):
-    return response.file(os.path.join(lara_click_home, 'index.html'))
+    index_args = {
+        'server_status_1': is_online('192.168.0.101'),
+        'server_status_2': is_online('192.168.0.102'),
+        'server_status_3': is_online('192.168.0.103'),
+        'server_status_4': is_online('192.168.0.104'),
+        'server_status_5': is_online('192.168.0.105'),
+        'server_status_6': is_online('192.168.0.106'),
+    }
+
+    with open(os.path.join(lara_click_home, 'index.html'), 'r') as index:
+        html = index.read().format(**index_args)
+
+    return response.html(html)
 
 
 @api.route('/', methods=['GET', 'POST'])
