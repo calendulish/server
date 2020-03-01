@@ -180,6 +180,7 @@ class UpdateDns(argparse.Action):
     def __init__(self, **kwargs):
         super().__init__(nargs=0, **kwargs)
         self.zone_id = config.get('CloudFlare', 'CF_ID')
+        self.record_id = config.get('CloudFlare', 'CF_RID')
 
     def list(self, type_='AAAA'):
         url = f"https://api.cloudflare.com/client/v4/zones/{self.zone_id}/dns_records"
@@ -200,7 +201,7 @@ class UpdateDns(argparse.Action):
         return self.list()['result'][0]['content']
 
     def update(self, ip, type='AAAA', proxied=True):
-        url = f"https://api.cloudflare.com/client/v4/zones/{self.zone_id}/dns_records/{id}"
+        url = f"https://api.cloudflare.com/client/v4/zones/{self.zone_id}/dns_records/{self.record_id}"
 
         payload = {
             'type': type,
