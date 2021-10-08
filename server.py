@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 #
-# Lara Maia <dev@lara.click> 2019
+# Lara Maia <dev@lara.click> 2019~2021
 #
 # Why?! Because I WANT!! Shut Up!!!
 #
@@ -21,25 +21,27 @@
 import argparse
 import configparser
 import json
+import netifaces
 import os
 import socket
 import ssl
 import subprocess
 
+from typing import Any, Dict, List, Optional, Tuple
+
 import aiohttp
 import requests
 from sanic import response, Blueprint, Sanic
 
-server = Sanic()
-server_home = '/home/alarm/Develop/server'
+script_dir = os.path.abspath(os.path.dirname(__file__))
+server = Sanic("Cascavel Server")
 config = configparser.RawConfigParser()
-config.read(os.path.join(server_home, 'config.ini'))
+config.read(os.path.join(script_dir, 'config.ini'))
 
-lara_click = Blueprint("lara.click", host='lara.click')
-lara_click_home = '/home/alarm/Develop/lara.click'
-lara_click.static('/', lara_click_home)
-
-api = Blueprint('api', host='api.lara.click')
+lara_monster = Blueprint("lara.monster", host='lara.monster')
+lara_monster_home = '/home/pi/lara.monster'
+lara_monster.static('/', lara_monster_home)
+api = Blueprint('api', host='api.lara.monster')
 
 
 @server.listener('before_server_start')
@@ -60,23 +62,6 @@ def is_online(ip):
         return 'Offline'
     else:
         return 'Online'
-
-
-@lara_click.route('/', methods=['GET'])
-def lara_click_index(request):
-    index_args = {
-        'server_status_1': is_online('192.168.0.101'),
-        'server_status_2': is_online('192.168.0.102'),
-        'server_status_3': is_online('192.168.0.103'),
-        'server_status_4': is_online('192.168.0.104'),
-        'server_status_5': is_online('192.168.0.105'),
-        'server_status_6': is_online('192.168.0.106'),
-    }
-
-    with open(os.path.join(lara_click_home, 'index.html'), 'r') as index:
-        html = index.read().format(**index_args)
-
-    return response.html(html)
 
 
 @api.route('/', methods=['GET', 'POST'])
@@ -107,43 +92,21 @@ async def api_proxy(request, path):
         return response.json(await proxy_response.json())
 
 
-server.blueprint(lara_click)
+server.blueprint(lara_monster)
 server.blueprint(api)
 
 
-class ListDNS(argparse.Action):
-    def __init__(self, **kwargs):
-        super().__init__(nargs=0, **kwargs)
-
-    def __call__(self, *args, **kwargs):
-        api_server = 'https://api.cloudflare.com'
-        CF_Key = config.get('CloudFlare', 'CF_Key')
-        CF_Email = config.get('CloudFlare', 'CF_Email')
-        CF_ID = config.get('CloudFlare', 'CF_ID')
-        CF_Type = config.get('CloudFlare', 'CF_Type')
-
-        headers = {
-            'X-Auth-Email': CF_Email,
-            'X-Auth-Key': CF_Key,
-        }
-
-        with requests.get(
-                f'{api_server}/client/v4/zones/{CF_ID}/dns_records?type={CF_Type}',
-                headers=headers
-        ) as response_:
-            print(json.dumps(response_.json(), indent=4))
-
-
 class StartServer(argparse.Action):
-    def __init__(self, **kwargs):
-        super().__init__(nargs=0, **kwargs)
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
 
-    def __call__(self, *args, **kwargs):
+    def __call__(self, *args, **kwargs) -> None:
         ssl_context = ssl.create_default_context(purpose=ssl.Purpose.CLIENT_AUTH)
         ssl_directory = config.get('General', 'ssl_directory')
+
         ssl_context.load_cert_chain(
             os.path.join(ssl_directory, 'fullchain.cer'),
-            keyfile=os.path.join(ssl_directory, 'lara.click.key'),
+            keyfile=os.path.join(ssl_directory, 'lara.monster.key'),
         )
 
         ipv6_socket = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
@@ -152,82 +115,137 @@ class StartServer(argparse.Action):
         server.run(sock=ipv6_socket, ssl=ssl_context, debug=False, access_log=True)
 
 
-class IssueCert(argparse.Action):
-    def __init__(self, **kwargs):
-        super().__init__(nargs=0, **kwargs)
+class Cloudflare:
+    def __init__(self, mail: str, key: str, api_server: str = 'https://api.cloudflare.com') -> None:
+        self.api_server = api_server
+        self.mail = mail
+        self.key = key
 
-    def __call__(self, *args, **kwargs):
-        env = {
-            'HOME': '/home/alarm',
-            'CF_Key': config.get('CloudFlare', 'CF_Key'),
-            'CF_Email': config.get('CloudFlare', 'CF_Email'),
+    @staticmethod
+    def _get_local_address(interface: str, type_: Tuple[int]):
+        #return subprocess.check_output(['curl', 'ifconfig.me']).decode()
+        #return socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET6)[0][4][0]
+        return netifaces.ifaddresses(interface)[type_[0]][type_[1]]['addr']
+
+    def _get_remote_address(self, zone_id: str, type_: str):
+        dns_list = self.list_dns(zone_id, type_)
+        return dns_list['result'][0]['content']
+
+    def list_dns(self, zone_id: str, type_: str) -> Dict[str, Any]:
+        headers = {
+            'X-Auth-Email': self.mail,
+            'X-Auth-Key': self.key,
         }
 
+        with requests.get(
+            f'{self.api_server}/client/v4/zones/{zone_id}/dns_records?type={type_}',
+            headers=headers
+        ) as response_:
+            return response_.json()
+
+    def update_dns(
+        self,
+        name: str,
+        zone_id: str,
+        record_id: str,
+        remote_type: str,
+        local_type: Tuple[int],
+        interface: str = 'eth0',
+        proxied: bool = True,
+    ) -> Optional[requests.Request]:
+        local_address = self._get_local_address(interface, local_type)
+        remote_address = self._get_remote_address(zone_id, remote_type)
+        
+        if local_address == remote_address:
+            return
+
+        headers = {
+            'X-Auth-Email': self.mail,
+            'X-Auth-Key': self.key,
+            'Content-Type': 'application/json',
+        }
+
+        payload = {
+            'type': remote_type,
+            'name': name,
+            'proxied': proxied,
+            'content': local_address,
+        }
+
+        with requests.put(
+            f"{self.api_server}/client/v4/zones/{zone_id}/dns_records/{record_id}",
+            headers=headers,
+            data=json.dumps(payload),
+        ) as response_:
+            return response_
+
+    def issue_cert(self, ssl_home: str, acme_directory: str, domains: List[str]) -> None:
+        env = {
+            'HOME': ssl_home,
+            'CF_Key': self.key,
+            'CF_Email': self.mail,
+        }
+
+        acme = os.path.join(script_dir, acme_directory, 'acme.sh')
+        kwargs = [acme, '--issue', '--dns', 'dns_cf']
+
+        for domain in domains:
+            kwargs.extend(['-d', domain])
+
         try:
-            subprocess.check_call(['acme.sh', '--issue', '-d', 'lara.click', '--dns', 'dns_cf'], env=env)
+            subprocess.check_call(kwargs, env=env)
         except subprocess.CalledProcessError as exception:
             if exception.returncode != 2 and exception.returncode != 0:
                 raise exception
 
 
-class UpdateDns(argparse.Action):
-    headers = {
-        'X-Auth-Email': config.get('CloudFlare', 'CF_Email'),
-        'X-Auth-Key': config.get('CloudFlare', 'CF_Key'),
-        'Content-Type': 'application/json'
-    }
+class CloudflareAction(argparse.Action):
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
+        mail = config.get('Cloudflare', 'mail')
+        key = config.get('Cloudflare', 'key')
+        self.cloudflare = Cloudflare(mail, key)
+            
+    def __call__(self, parser: Any, namespace: argparse.Namespace, values: List[str], option_string: str) -> None:
+        zone_id = config.get('Cloudflare', 'zone_id')
 
-    def __init__(self, **kwargs):
-        super().__init__(nargs=0, **kwargs)
-        self.zone_id = config.get('CloudFlare', 'CF_ID')
-        self.record_id = config.get('CloudFlare', 'CF_RID')
+        if option_string == '--list-dns':
+            dns_list = self.cloudflare.list_dns(zone_id, values[0])
+            print(json.dumps(dns_list, indent=4))
 
-    def list(self, type_='AAAA'):
-        url = f"https://api.cloudflare.com/client/v4/zones/{self.zone_id}/dns_records"
+        if option_string == '--update-dns':
+            if values[0] == 'main':
+                record_id = config.get('Cloudflare', 'main_record_id')
+                remote_type = config.get('Cloudflare', 'main_record_type')
+                name = 'lara.monster'
+                local_type = (netifaces.AF_INET6, 1)
+                proxied = True
+            else:
+                record_id = config.get('Cloudflare', 'ssh_record_id')
+                remote_type = config.get('Cloudflare', 'ssh_record_type')
+                name = 'ssh.lara.monster'
+                local_type = (netifaces.AF_INET, 0)
+                proxied = False
+        
+            response = self.cloudflare.update_dns(name, zone_id, record_id, remote_type, local_type, 'wlan0', proxied)
 
-        payload = {
-            'type': type_,
-        }
+            if not response:
+                print("Address is already updated")
+                return
+            
+            print(f'status: {response.status_code}')
 
-        response_ = requests.get(url, headers=self.headers, data=json.dumps(payload))
-
-        return response_.json()
-
-    @staticmethod
-    def _get_local_address():
-        return socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET6)[0][4][0]
-
-    def _get_remote_address(self):
-        return self.list()['result'][0]['content']
-
-    def update(self, ip, type='AAAA', proxied=True):
-        url = f"https://api.cloudflare.com/client/v4/zones/{self.zone_id}/dns_records/{self.record_id}"
-
-        payload = {
-            'type': type,
-            'name': 'lara.click',
-            'proxied': proxied,
-            'content': ip,
-        }
-
-        response_ = requests.put(url, headers=self.headers, data=json.dumps(payload))
-
-        return response_.status_code
-
-    def __call__(self, *args, **kwargs):
-        local_ip = self._get_local_address()
-        remote_ip = self._get_remote_address()
-
-        if local_ip == remote_ip:
-            print("Address is already updated")
-        else:
-            print(self.update(local_ip))
+        if option_string == '--issue-cert':
+            ssl_home = config.get('General', 'ssl_home')
+            acme_directory = config.get('General', 'acme_directory')
+            domains = ['lara.monster', 'www.lara.monster', 'api.lara.monster']
+            self.cloudflare.issue_cert(ssl_home, acme_directory, domains)
 
 
 if __name__ == '__main__':
     command_parser = argparse.ArgumentParser()
-    command_parser.add_argument('--list-dns', action=ListDNS)
-    command_parser.add_argument('--start', action=StartServer)
-    command_parser.add_argument('--issue-cert', action=IssueCert)
-    command_parser.add_argument('--update-dns', action=UpdateDns)
+    command_parser.add_argument('--start', action=StartServer, nargs=0)
+    command_parser.add_argument('--list-dns', action=CloudflareAction, nargs=1, choices=['A', 'AAAA'])
+    command_parser.add_argument('--update-dns', action=CloudflareAction, nargs=1, choices=['main', 'ssh'])
+    command_parser.add_argument('--issue-cert', action=CloudflareAction, nargs=0)
     command_parser.parse_args()
