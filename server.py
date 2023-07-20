@@ -71,11 +71,7 @@ def api_index(request):
 
 @api.route('/<path:[^/].*?>', methods=['GET', 'POST'])
 async def api_proxy(request, path):
-    token = "?"
-
-    if request.query_string:
-        token = '&'
-
+    token = '&' if request.query_string else "?"
     kwargs = {
         'method': 'POST' if request.form else 'GET',
         'url': f"{config.get('General', 'steam_server')}/{path}",
@@ -195,7 +191,7 @@ class Cloudflare:
         try:
             subprocess.check_call(kwargs, env=env)
         except subprocess.CalledProcessError as exception:
-            if exception.returncode != 2 and exception.returncode != 0:
+            if exception.returncode not in [2, 0]:
                 raise exception
 
 
@@ -209,11 +205,16 @@ class CloudflareAction(argparse.Action):
     def __call__(self, parser: Any, namespace: argparse.Namespace, values: List[str], option_string: str) -> None:
         zone_id = config.get('Cloudflare', 'zone_id')
 
-        if option_string == '--list-dns':
+        if option_string == '--issue-cert':
+            ssl_home = config.get('General', 'ssl_home')
+            acme_directory = config.get('General', 'acme_directory')
+            domains = ['lara.monster', 'www.lara.monster', 'api.lara.monster']
+            self.cloudflare.issue_cert(ssl_home, acme_directory, domains)
+        elif option_string == '--list-dns':
             dns_list = self.cloudflare.list_dns(zone_id, values[0])
             print(json.dumps(dns_list, indent=4))
 
-        if option_string == '--update-dns':
+        elif option_string == '--update-dns':
             if values[0] == 'main':
                 record_id = config.get('Cloudflare', 'main_record_id')
                 remote_type = config.get('Cloudflare', 'main_record_type')
@@ -226,20 +227,14 @@ class CloudflareAction(argparse.Action):
                 name = 'ssh.lara.monster'
                 local_type = (netifaces.AF_INET, 0)
                 proxied = False
-        
+
             response = self.cloudflare.update_dns(name, zone_id, record_id, remote_type, local_type, 'wlan0', proxied)
 
             if not response:
                 print("Address is already updated")
                 return
-            
-            print(f'status: {response.status_code}')
 
-        if option_string == '--issue-cert':
-            ssl_home = config.get('General', 'ssl_home')
-            acme_directory = config.get('General', 'acme_directory')
-            domains = ['lara.monster', 'www.lara.monster', 'api.lara.monster']
-            self.cloudflare.issue_cert(ssl_home, acme_directory, domains)
+            print(f'status: {response.status_code}')
 
 
 if __name__ == '__main__':
